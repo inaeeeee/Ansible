@@ -54,35 +54,6 @@ jobs:
           echo "DB 서버에서 파일 다운로드 완료!"
           ls -la /tmp/ansible-temp/
           
-      - name: Ansible 설정 파일 수정
-        run: |
-          echo "Ansible 설정 파일 수정 중..."
-          
-          # inventory 파일 확인 및 수정
-          if [ -f /tmp/ansible-temp/inventory ]; then
-            cat /tmp/ansible-temp/inventory
-            
-            # SSH 비밀번호 인증 설정 추가
-            echo "
-          [all:vars]
-          ansible_user=awx
-          ansible_password=${{ env.WEB_PASSWORD }}
-          ansible_ssh_common_args='-o StrictHostKeyChecking=no'
-          ansible_connection=ssh
-          " >> /tmp/ansible-temp/inventory
-            
-            echo "인벤토리 파일 수정 완료"
-            cat /tmp/ansible-temp/inventory
-          fi
-          
-          # ansible.cfg 파일 생성 또는 수정
-          echo "[defaults]
-          host_key_checking = False
-          remote_user = awx
-          " > /tmp/ansible-temp/ansible.cfg
-          
-          echo "Ansible 설정 파일 준비 완료"
-          
       - name: Runner에서 AWX 서버로 파일 업로드
         run: |
           echo "Runner에서 AWX 서버로 Ansible 파일 업로드 중..."
@@ -126,6 +97,6 @@ jobs:
           
           # AWX 서버에 접속하여 ansible-playbook 명령 실행 (비밀번호 인증 사용)
           sshpass -p "${{ env.AWX_PASSWORD }}" ssh -o StrictHostKeyChecking=no \
-            awx@${{ env.ANSIBLE_MASTER }} "cd ${{ env.ANSIBLE_PATH }} && ANSIBLE_HOST_KEY_CHECKING=False ansible-playbook -i inventory deployment.yml -e 'ansible_user=awx ansible_password=${{ env.WEB_PASSWORD }}' -v"
+            awx@${{ env.ANSIBLE_MASTER }} "cd ${{ env.ANSIBLE_PATH }} && ANSIBLE_HOST_KEY_CHECKING=False ansible-playbook deployment.yml -e 'ansible_user=awx ansible_password=${{ env.WEB_PASSWORD }}' -v"
           
           echo "Ansible Playbook 실행 완료!"
