@@ -53,7 +53,7 @@ jobs:
             
             echo 'ansible.cfg 파일 내용:'
             cat ${{ env.ANSIBLE_PATH }}/ansible.cfg
-          "
+          " || echo "일부 파일이 존재하지 않을 수 있습니다."
 
       - name: Copy Ansible Files from DB Server (Optional)
         run: |
@@ -82,6 +82,90 @@ jobs:
           
           # 배포 플레이북이 존재하는지 확인
           sshpass -p "${{ env.AWX_PASSWORD }}" ssh -o StrictHostKeyChecking=no awx@${{ env.ANSIBLE_MASTER }} "
+            if [ -f ${{ env.ANSIBLE_PATH }}/deployment.yml ]; then
+              echo '✅ 배포 플레이북이 존재합니다.'
+              echo '플레이북 내용:'
+              cat ${{ env.ANSIBLE_PATH }}/deployment.yml
+            else
+              echo '⚠️ 배포 플레이북이 존재하지 않습니다. 기본 플레이북을 생성합니다.'
+              cat > ${{ env.ANSIBLE_PATH }}/deployment.yml << 'EOL'
+          ---
+          - name: 기본 배포 스크립트 실행
+            hosts: localhost
+            connection: local
+            tasks:
+              - name: 기본 배포 시작
+                debug:
+                  msg: '동적 배포 스크립트가 없어 기본 배포를 시작합니다.'
+
+          - name: Nginx 웹 서버 구성
+            hosts: webservers
+            become: yes
+            tasks:
+              - name: Nginx 설치
+                package:
+                  name: nginx
+                  state: present
+                ignore_errors: yes
+
+              - name: Nginx 서비스 시작 및 활성화
+                service:
+                  name: nginx
+                  state: started
+                  enabled: yes
+                ignore_errors: yes
+
+              - name: 기본 웹 페이지 생성
+                copy:
+                  content: |
+                    <!DOCTYPE html>
+                    <html>
+                    <head>
+                      <title>Ansible 배포 테스트</title>
+                    </head>
+                    <body>
+                      <h1>Ansible로 배포된 웹 서버입니다</h1>
+                      <p>호스트명: {{ ansible_hostname }}</p>
+                      <p>IP 주소: {{ ansible_default_ipv4.address }}</p>
+                      <p>배포 시간: {{ ansible_date_time.iso8601 }}</p>
+                    </body>
+                    </html>
+                  dest: /usr/share/nginx/html/index.html
+                ignore_errors: yes
+          EOL
+            fi
+            
+            # 인벤토리 파일 확인 및 생성
+            if [ ! -f ${{ env.ANSIBLE_PATH }}/inventory/hosts ]; then
+              echo '⚠️ 인벤토리 파일이 존재하지 않습니다. 기본 인벤토리를 생성합니다.'
+              mkdir -p ${{ env.ANSIBLE_PATH }}/inventory
+              cat > ${{ env.ANSIBLE_PATH }}/inventory/hosts << 'EOL'
+          [webservers]
+          web-server1 ansible_host=192.168.50.13 ansible_user=awx ansible_ssh_pass=redhat ansible_sudo_pass=redhat
+          web-server2 ansible_host=192.168.50.14 ansible_user=awx ansible_ssh_pass=redhat ansible_sudo_pass=redhat
+
+          [dbservers]
+          db-server ansible_host=192.168.50.15 ansible_user=awx ansible_ssh_pass=redhat ansible_sudo_pass=redhat
+
+          [all:vars]
+          ansible_connection=ssh
+          ansible_ssh_common_args='-o StrictHostKeyChecking=no'
+          EOL
+            fi
+            
+            # ansible.cfg 파일 확인 및 생성
+            if [ ! -f ${{ env.ANSIBLE_PATH }}/ansible.cfg ]; then
+              echo '⚠️ ansible.cfg 파일이 존재하지 않습니다. 기본 설정 파일을 생성합니다.'
+              cat > ${{ env.ANSIBLE_PATH }}/ansible.cfg << 'EOL'
+          [defaults]
+          host_key_checking = False
+          remote_user = awx
+          
+          [ssh_connection]
+          scp_if_ssh = True
+          EOL
+            fi
+          "
      
       - name: Execute Ansible Deployment Playbook
         run: |
