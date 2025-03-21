@@ -34,42 +34,52 @@ jobs:
         run: |
           echo "PostgreSQL에서 Ansible 배포 정보 가져오는 중..."
           
-          # sshpass로 DB 서버에 접속해 정보 조회
           SERVICE_INFO=$(sshpass -p "${{ env.DB_PASSWORD }}" ssh -o StrictHostKeyChecking=no postgres@${{ env.DB_SERVER }} \
             "psql -d solmakasedb -t -c \"SELECT name, deploy_script FROM servicetemplate WHERE name = 'ansible';\"")
 
           echo "Ansible 서비스 정보:"
           echo "$SERVICE_INFO"
 
-          SERVICE_NAME=$(echo "$SERVICE_INFO" | awk -F '|' '{print $1}' | xargs)
-          DEPLOY_SCRIPT=$(echo "$SERVICE_INFO" | awk -F '|' '{print $2}' | xargs)
-
-          echo "----------------------------------------"
-          echo "서비스명: $SERVICE_NAME"
-          echo "배포 스크립트 경로: $DEPLOY_SCRIPT"
-
-      - name: AWX 서버에서 목적지 폴더 생성
+      - name: Runner에 임시 디렉토리 생성
         run: |
-          echo "AWX 서버에 목적지 폴더 생성 중..."
-          sshpass -p "${{ env.AWX_PASSWORD }}" ssh -o StrictHostKeyChecking=no awx@${{ env.ANSIBLE_MASTER }} \
-            "mkdir -p ${{ env.ANSIBLE_PATH }}"
+          echo "Runner에 임시 디렉토리 생성 중..."
+          mkdir -p /tmp/ansible-temp
 
-      - name: DB 서버에서 AWX 서버로 Ansible 파일 복사
+      - name: DB 서버에서 Runner로 파일 다운로드
         run: |
-          echo "DB 서버에서 Ansible 파일 전체를 AWX 서버(${{ env.ANSIBLE_MASTER }})로 복사 중..."
+          echo "DB 서버에서 Ansible 파일을 Runner로 다운로드 중..."
+          sshpass -p "${{ env.DB_PASSWORD }}" scp -r -o StrictHostKeyChecking=no \
+            postgres@${{ env.DB_SERVER }}:${{ env.DB_ANSIBLE_PATH }}/* /tmp/ansible-temp/
           
-          # DB 서버에서 AWX 서버로 sshpass를 사용해 파일 복사
-          sshpass -p "${{ env.DB_PASSWORD }}" ssh -o StrictHostKeyChecking=no postgres@${{ env.DB_SERVER }} \
-            "sshpass -p '${{ env.AWX_PASSWORD }}' scp -r ${{ env.DB_ANSIBLE_PATH }}/* awx@${{ env.ANSIBLE_MASTER }}:${{ env.ANSIBLE_PATH }}/"
+          echo "DB 서버에서 파일 다운로드 완료!"
+          ls -la /tmp/ansible-temp/
+
+      - name: Runner에서 AWX 서버로 파일 업로드
+        run: |
+          echo "Runner에서 AWX 서버로 Ansible 파일 업로드 중..."
           
-          echo "파일 복사 완료!"
+          # AWX 서버에 디렉토리 생성
+          sshpass -p "${{ env.AWX_PASSWORD }}" ssh -o StrictHostKeyChecking=no \
+            awx@${{ env.ANSIBLE_MASTER }} "mkdir -p ${{ env.ANSIBLE_PATH }}"
+          
+          # Runner에서 AWX 서버로 파일 업로드
+          sshpass -p "${{ env.AWX_PASSWORD }}" scp -r -o StrictHostKeyChecking=no \
+            /tmp/ansible-temp/* awx@${{ env.ANSIBLE_MASTER }}:${{ env.ANSIBLE_PATH }}/
+          
+          echo "AWX 서버로 파일 업로드 완료!"
+
+      - name: AWX 서버에서 파일 확인
+        run: |
+          echo "AWX 서버에 파일이 정상적으로 복사되었는지 확인 중..."
+          sshpass -p "${{ env.AWX_PASSWORD }}" ssh -o StrictHostKeyChecking=no \
+            awx@${{ env.ANSIBLE_MASTER }} "ls -la ${{ env.ANSIBLE_PATH }}"
 
       - name: AWX 서버에서 Ansible Playbook 실행
         run: |
           echo "AWX 서버에서 Ansible Playbook 실행 중..."
           
           # AWX 서버에 접속하여 ansible-playbook 명령 실행
-          sshpass -p "${{ env.AWX_PASSWORD }}" ssh -o StrictHostKeyChecking=no awx@${{ env.ANSIBLE_MASTER }} \
-            "cd ${{ env.ANSIBLE_PATH }} && ansible-playbook deployment.yml"
+          sshpass -p "${{ env.AWX_PASSWORD }}" ssh -o StrictHostKeyChecking=no \
+            awx@${{ env.ANSIBLE_MASTER }} "cd ${{ env.ANSIBLE_PATH }} && ansible-playbook deployment.yml"
           
           echo "Ansible Playbook 실행 완료!"
