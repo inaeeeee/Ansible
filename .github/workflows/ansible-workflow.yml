@@ -78,6 +78,10 @@ jobs:
           else
             echo "❌ playbooks 디렉토리가 없습니다"
           fi
+          
+          # 루트 디렉토리의 YAML 파일 확인
+          echo "루트 디렉토리의 YAML 파일 확인:"
+          ls -la /tmp/ansible-full/*.yml 2>/dev/null || echo "루트 디렉토리에 YAML 파일이 없습니다"
 
       - name: Copy Ansible Files to Master Server
         run: |
@@ -90,9 +94,9 @@ jobs:
           echo "마스터 서버의 Ansible 파일 구조:"
           sshpass -p "${{ env.AWX_PASSWORD }}" ssh -o StrictHostKeyChecking=no awx@${{ env.ANSIBLE_MASTER }} "ls -la ${{ env.ANSIBLE_PATH }}/"
           
-          # 플레이북 디렉토리 내용 확인
-          echo "플레이북 파일 확인:"
-          sshpass -p "${{ env.AWX_PASSWORD }}" ssh -o StrictHostKeyChecking=no awx@${{ env.ANSIBLE_MASTER }} "ls -la ${{ env.ANSIBLE_PATH }}/playbooks/"
+          # 플레이북 파일 확인
+          echo "루트 디렉토리의 YAML 파일 확인:"
+          sshpass -p "${{ env.AWX_PASSWORD }}" ssh -o StrictHostKeyChecking=no awx@${{ env.ANSIBLE_MASTER }} "ls -la ${{ env.ANSIBLE_PATH }}/*.yml 2>/dev/null || echo '루트 디렉토리에 YAML 파일이 없습니다'"
 
       - name: Create logs Directory
         run: |
@@ -101,12 +105,22 @@ jobs:
           # 로그 디렉토리가 없으면 생성
           sshpass -p "${{ env.AWX_PASSWORD }}" ssh -o StrictHostKeyChecking=no awx@${{ env.ANSIBLE_MASTER }} "mkdir -p ${{ env.ANSIBLE_PATH }}/logs && chmod 777 ${{ env.ANSIBLE_PATH }}/logs"
 
+      - name: Fix SSH Key Permissions
+        run: |
+          echo "🔧 SSH 키 권한 수정 중..."
+          
+          # SSH 키 권한 수정
+          sshpass -p "${{ env.AWX_PASSWORD }}" ssh -o StrictHostKeyChecking=no awx@${{ env.ANSIBLE_MASTER }} "chmod 600 ~/.ssh/id_rsa ~/.ssh/id_rsa.pub 2>/dev/null || echo 'SSH 키가 없습니다'"
+          
+          # SSH 에이전트 재시작
+          sshpass -p "${{ env.AWX_PASSWORD }}" ssh -o StrictHostKeyChecking=no awx@${{ env.ANSIBLE_MASTER }} "eval \$(ssh-agent) && ssh-add ~/.ssh/id_rsa 2>/dev/null || echo 'SSH 키를 추가할 수 없습니다'"
+
       - name: Execute Ansible Deployment Playbook
         run: |
           echo "🚀 Ansible 배포 플레이북 실행 중..."
           
-          # 마스터 서버에서 직접 Ansible 플레이북 실행
-          sshpass -p "${{ env.AWX_PASSWORD }}" ssh -o StrictHostKeyChecking=no awx@${{ env.ANSIBLE_MASTER }} "cd ${{ env.ANSIBLE_PATH }} && ansible-playbook -i inventory/hosts playbooks/deployment.yml"
+          # 마스터 서버에서 직접 Ansible 플레이북 실행 (루트 디렉토리의 deployment.yml)
+          sshpass -p "${{ env.AWX_PASSWORD }}" ssh -o StrictHostKeyChecking=no awx@${{ env.ANSIBLE_MASTER }} "cd ${{ env.ANSIBLE_PATH }} && ansible-playbook -i inventory/hosts deployment.yml"
           
           DEPLOYMENT_STATUS=$?
           if [ $DEPLOYMENT_STATUS -eq 0 ]; then
@@ -254,4 +268,35 @@ jobs:
                           '-d', 'solmakasedb', '-c', network_sql
                       ]
                       subprocess.run(cmd, env=dict(os.environ, PGPASSWORD='soldesk1.'))
-                      print(f
+                      print(f"✅ 새 VM '{hostname}' 및 네트워크 정보가 추가되었습니다.")
+          
+          # 메인 실행
+          workspace_id = get_workspace_id()
+          vm_files = glob.glob('/tmp/vm-info-results/*.json')
+          
+          for vm_file in vm_files:
+              with open(vm_file, 'r') as f:
+                  try:
+                      vm_data = json.load(f)
+                      save_vm_info(vm_data, workspace_id)
+                  except json.JSONDecodeError:
+                      print(f"❌ 오류: {vm_file} 파일을 파싱할 수 없습니다.")
+                  except Exception as e:
+                      print(f"❌ 오류 발생: {str(e)}")
+          
+          print("✅ 모든 VM 정보 처리 완료")
+          EOF
+          
+          chmod +x /tmp/update_db.py
+
+      - name: Update Database with VM Information
+        run: |
+          echo "💾 VM 정보 DB 업데이트 중..."
+          # JSON 파일이 있는지 확인
+          if [ -z "$(ls -A /tmp/vm-info-results/*.json 2>/dev/null)" ]; then
+            echo "⚠️ 수집된 VM 정보 파일이 없습니다"
+            exit 0
+          fi
+          
+          # DB 업데이트 스크립트 실행
+          python3 /tmp/update_db.py
