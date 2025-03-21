@@ -1,0 +1,51 @@
+name: Deploy Web App with Ansible
+
+on:
+  workflow_dispatch:  # 수동 실행 가능하도록 설정
+
+jobs:
+  deploy:
+    runs-on: self-hosted  # GitHub Actions 실행 서버
+
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v3
+
+      - name: Fetch Application Deployment Info from PostgreSQL
+        run: |
+          echo "Fetching deployment information from PostgreSQL..."
+          
+          SERVICE_INFO=$(ssh -o StrictHostKeyChecking=no root@192.168.60.64\
+            "sudo -u postgres psql -d solmakasedb -t -c \"SELECT name, deploy_script FROM servicetemplate WHERE name = 'ansible';\"")
+
+          echo "Found service info:"
+          echo "$SERVICE_INFO"
+
+          SERVICE_NAME=$(echo "$SERVICE_INFO" | awk -F '|' '{print $1}' | xargs)
+          DEPLOY_SCRIPT=$(echo "$SERVICE_INFO" | awk -F '|' '{print $2}' | xargs)
+
+          echo "----------------------------------------"
+          echo "Service: $SERVICE_NAME"
+          echo "Deploy Script Path: $DEPLOY_SCRIPT"
+          
+          # 변수를 환경 변수로 저장하여 다음 단계에서 사용
+          echo "SERVICE_NAME=$SERVICE_NAME" >> $GITHUB_ENV
+          echo "DEPLOY_SCRIPT=$DEPLOY_SCRIPT" >> $GITHUB_ENV
+
+      - name: Check if Ansible is installed
+        run: |
+          ssh -o StrictHostKeyChecking=no awx@192.168.50.11 "ansible --version || (echo 'Installing Ansible...' && yum install -y ansible)"
+
+      - name: Execute Ansible Deployment Script
+        run: |
+          echo "Executing deployment script on target server..."
+          ssh -o StrictHostKeyChecking=no awx@192.168.50.11 "chmod +x ${{ env.DEPLOY_SCRIPT }} && ${{ env.DEPLOY_SCRIPT }}"
+          
+          echo "Checking deployment result..."
+          DEPLOYMENT_STATUS=$?
+          if [ $DEPLOYMENT_STATUS -eq 0 ]; then
+            echo "✅ Deployment completed successfully!"
+          else
+            echo "❌ Deployment failed with status code $DEPLOYMENT_STATUS"
+            exit $DEPLOYMENT_STATUS
+          fi
