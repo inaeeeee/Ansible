@@ -11,9 +11,18 @@ jobs:
       - name: Checkout Repository
         uses: actions/checkout@v3
 
-      - name: Install PostgreSQL Client if needed
+      - name: Install Required Tools
         run: |
-          echo "🔧 PostgreSQL 클라이언트 설치 확인 중..."
+          echo "🔧 필요한 도구 설치 확인 중..."
+          # sshpass 확인 및 설치 (비밀번호 자동화용)
+          if ! command -v sshpass &> /dev/null; then
+            echo "⚠️ sshpass 설치 중..."
+            sudo yum install -y sshpass
+          else
+            echo "✅ sshpass가 이미 설치되어 있습니다."
+          fi
+          
+          # PostgreSQL 클라이언트 확인 및 설치
           if ! command -v psql &> /dev/null; then
             echo "⚠️ PostgreSQL 클라이언트 설치 중..."
             sudo yum install -y postgresql
@@ -21,89 +30,57 @@ jobs:
             echo "✅ PostgreSQL 클라이언트가 이미 설치되어 있습니다."
           fi
 
-      - name: Setup PostgreSQL Authentication
+      - name: Set Environment Variables
         run: |
-          echo "🔧 PostgreSQL 인증 설정 중..."
-          echo "192.168.60.64:5432:*:postgres:qaz123" > ~/.pgpass
-          echo "192.168.60.65:5432:*:postgres:qaz123" >> ~/.pgpass
-          echo "192.168.60.66:5432:*:postgres:qaz123" >> ~/.pgpass
-          echo "192.168.60.67:5001:*:postgres:qaz123" >> ~/.pgpass
-          chmod 600 ~/.pgpass
+          echo "DB_PASSWORD=soldesk1." >> $GITHUB_ENV
+          echo "AWX_PASSWORD=redhat" >> $GITHUB_ENV
+          echo "DB_SERVER=192.168.60.64" >> $GITHUB_ENV
+          echo "ANSIBLE_MASTER=192.168.50.11" >> $GITHUB_ENV
+          echo "TEMPLATE_PATH=/var/lib/pgsql/data/service_templates/ansible" >> $GITHUB_ENV
 
-      - name: Fetch Ansible Deployment Info from PostgreSQL
+      - name: Fetch Ansible Deployment Script Path
         run: |
           echo "🔍 PostgreSQL에서 Ansible 배포 정보 조회 중..."
-
-          # HAProxy(5001)에서 데이터 조회 시도
-          SERVICE_INFO=$(psql -h 192.168.60.67 -p 5001 -U postgres -d solmakasedb -t -w -c \
-            "SELECT name, deploy_script FROM servicetemplate WHERE name = 'ansible';")
-
-          # 결과가 없으면 다른 DB 서버 시도
-          if [[ -z "$SERVICE_INFO" ]]; then
-            for DB_HOST in 192.168.60.64 192.168.60.65 192.168.60.66; do
-              SERVICE_INFO=$(psql -h $DB_HOST -p 5432 -U postgres -d solmakasedb -t -w -c \
-                "SELECT name, deploy_script FROM servicetemplate WHERE name = 'ansible';")
-              
-              if [[ ! -z "$SERVICE_INFO" ]]; then
-                echo "✅ $DB_HOST에서 Ansible 서비스 정보를 찾았습니다."
-                DB_SERVER=$DB_HOST
-                break
-              fi
-            done
+          
+          # PGPASSWORD 환경 변수를 사용하여 비밀번호 자동 입력
+          SCRIPT_PATH=$(PGPASSWORD=${{ env.DB_PASSWORD }} psql -h ${{ env.DB_SERVER }} -p 5432 -U postgres -d solmakasedb -t -c \
+            "SELECT deploy_script FROM servicetemplate WHERE name = 'ansible';" | xargs)
+          
+          if [[ -z "$SCRIPT_PATH" ]]; then
+            echo "❌ Ansible 배포 스크립트 경로를 찾을 수 없습니다."
+            echo "기본 경로 사용: ${{ env.TEMPLATE_PATH }}/scripts/deploy.sh"
+            SCRIPT_PATH="${{ env.TEMPLATE_PATH }}/scripts/deploy.sh"
           else
-            DB_SERVER="192.168.60.67"
-            echo "✅ HAProxy에서 Ansible 서비스 정보를 찾았습니다."
+            echo "✅ 배포 스크립트 경로: $SCRIPT_PATH"
           fi
+          
+          echo "SCRIPT_PATH=$SCRIPT_PATH" >> $GITHUB_ENV
 
-          if [[ -z "$SERVICE_INFO" ]]; then
-            echo "❌ Ansible 배포 정보를 찾을 수 없습니다!"
-            exit 1
-          fi
+      - name: Create Temporary Directories
+        run: |
+          echo "🔧 임시 디렉토리 생성 중..."
+          mkdir -p /tmp/ansible-files
+          mkdir -p /tmp/vm-info
+          
+          # 마스터 서버에 임시 디렉토리 생성
+          sshpass -p "${{ env.AWX_PASSWORD }}" ssh -o StrictHostKeyChecking=no awx@${{ env.ANSIBLE_MASTER }} "mkdir -p /tmp/ansible-files /tmp/vm-info"
 
-          echo "✅ Ansible 서비스 정보: $SERVICE_INFO"
-
-          DEPLOY_SCRIPT=$(echo "$SERVICE_INFO" | awk -F '|' '{print $2}' | xargs)
-          echo "📌 배포 스크립트 경로: $DEPLOY_SCRIPT"
-
-          # 사용할 수 있는 DB 서버 목록
-          DB_SERVERS=("192.168.60.64" "192.168.60.65" "192.168.60.66")
-          SELECTED_DB_SERVER=""
-
-          echo "🔍 배포 스크립트가 존재하는 DB 서버 찾는 중..."
-
-          # 실제로 파일이 존재하는 DB 서버 찾기
-          for DB_SERVER in "${DB_SERVERS[@]}"; do
-              echo "🔍 $DB_SERVER 확인 중..."
-              if ssh -o StrictHostKeyChecking=no postgres@$DB_SERVER "test -f $DEPLOY_SCRIPT"; then
-                  SELECTED_DB_SERVER=$DB_SERVER
-                  echo "✅ $DB_SERVER에서 배포 스크립트를 찾았습니다."
-                  break
-              fi
-          done
-
-          # DB 서버를 찾지 못하면 오류 발생
-          if [[ -z "$SELECTED_DB_SERVER" ]]; then
-              echo "❌ 오류: 어떤 DB 서버에도 배포 스크립트가 없습니다!"
-              exit 1
-          fi
-
-          # 선택된 DB 서버 저장
-          echo "SELECTED_DB_SERVER=$SELECTED_DB_SERVER" >> $GITHUB_ENV
-          echo "DEPLOY_SCRIPT=$DEPLOY_SCRIPT" >> $GITHUB_ENV
-
-          # Ansible 템플릿 디렉토리 경로 추출
-          TEMPLATE_DIR=$(dirname $(dirname $DEPLOY_SCRIPT))
-          echo "ANSIBLE_TEMPLATE_DIR=$TEMPLATE_DIR" >> $GITHUB_ENV
+      - name: Copy Ansible Files from DB Server to Master Server
+        run: |
+          echo "🚀 Ansible 파일을 DB 서버에서 마스터 서버로 복사 중..."
+          
+          # 1단계: DB 서버에서 로컬로 파일 복사
+          sshpass -p "${{ env.DB_PASSWORD }}" scp -o StrictHostKeyChecking=no -r postgres@${{ env.DB_SERVER }}:${{ env.TEMPLATE_PATH }}/* /tmp/ansible-files/
+          
+          # 2단계: 로컬에서 마스터 서버로 파일 복사
+          sshpass -p "${{ env.AWX_PASSWORD }}" scp -o StrictHostKeyChecking=no -r /tmp/ansible-files/* awx@${{ env.ANSIBLE_MASTER }}:/tmp/ansible-files/
 
       - name: Create VM Info Collection Playbook
         run: |
           echo "🔧 VM 정보 수집 플레이북 생성 중..."
           
-          # 임시 디렉토리 생성
-          mkdir -p /tmp/ansible-vminfo
-          
           # VM 정보 수집용 Ansible 플레이북 생성
-          cat > /tmp/ansible-vminfo/collect_vm_info.yml << EOF
+          cat > /tmp/vm-info/collect_vm_info.yml << EOF
           ---
           - name: 서버 정보 수집
             hosts: all
@@ -127,19 +104,26 @@ jobs:
                       "storage_gb": {{ (ansible_mounts[0].size_total / 1024 / 1024 / 1024) | round | int | default(20) }},
                       "status": "running"
                     }
-                  dest: "/tmp/ansible-vminfo/{{ ansible_hostname }}.json"
+                  dest: "/tmp/vm-info/{{ ansible_hostname }}.json"
                   mode: '0644'
           EOF
           
-          # DB 저장용 스크립트 생성
-          cat > /tmp/ansible-vminfo/save_to_db.py << EOF
+          # VM 정보 수집 플레이북을 마스터 서버로 복사
+          sshpass -p "${{ env.AWX_PASSWORD }}" scp -o StrictHostKeyChecking=no /tmp/vm-info/collect_vm_info.yml awx@${{ env.ANSIBLE_MASTER }}:/tmp/vm-info/
+
+      - name: Create Database Update Script
+        run: |
+          echo "🔧 DB 업데이트 스크립트 생성 중..."
+          
+          # VM 정보를 DB에 저장하는 스크립트 생성
+          cat > /tmp/vm-info/update_db.py << EOF
           #!/usr/bin/env python3
           import os
           import json
           import glob
           import subprocess
           import datetime
-
+          
           def get_workspace_id():
               """회사 워크스페이스 ID 조회"""
               cmd = [
@@ -147,9 +131,9 @@ jobs:
                   '-d', 'solmakasedb', '-t', '-c', 
                   "SELECT id FROM companywworkspace LIMIT 1;"
               ]
-              result = subprocess.run(cmd, capture_output=True, text=True, env=dict(os.environ, PGPASSWORD='qaz123'))
+              result = subprocess.run(cmd, capture_output=True, text=True, env=dict(os.environ, PGPASSWORD='soldesk1.'))
               return result.stdout.strip() or '1'  # 기본값 1
-
+          
           def save_vm_info(vm_data, workspace_id):
               """VM 정보를 DB에 저장"""
               hostname = vm_data['hostname']
@@ -160,7 +144,7 @@ jobs:
                   'psql', '-h', '192.168.60.64', '-p', '5432', '-U', 'postgres', 
                   '-d', 'solmakasedb', '-t', '-c', check_sql
               ]
-              result = subprocess.run(cmd, capture_output=True, text=True, env=dict(os.environ, PGPASSWORD='qaz123'))
+              result = subprocess.run(cmd, capture_output=True, text=True, env=dict(os.environ, PGPASSWORD='soldesk1.'))
               vm_id = result.stdout.strip()
               
               now = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
@@ -181,7 +165,7 @@ jobs:
                       'psql', '-h', '192.168.60.64', '-p', '5432', '-U', 'postgres', 
                       '-d', 'solmakasedb', '-c', update_sql
                   ]
-                  subprocess.run(cmd, env=dict(os.environ, PGPASSWORD='qaz123'))
+                  subprocess.run(cmd, env=dict(os.environ, PGPASSWORD='soldesk1.'))
                   print(f"✅ VM '{hostname}' 정보가 업데이트되었습니다.")
               else:
                   # 새 VM 추가
@@ -199,7 +183,7 @@ jobs:
                       'psql', '-h', '192.168.60.64', '-p', '5432', '-U', 'postgres', 
                       '-d', 'solmakasedb', '-t', '-c', insert_sql
                   ]
-                  result = subprocess.run(cmd, capture_output=True, text=True, env=dict(os.environ, PGPASSWORD='qaz123'))
+                  result = subprocess.run(cmd, capture_output=True, text=True, env=dict(os.environ, PGPASSWORD='soldesk1.'))
                   new_vm_id = result.stdout.strip()
                   
                   # VM 네트워크 정보 추가
@@ -214,11 +198,11 @@ jobs:
                       ]
                       subprocess.run(cmd, env=dict(os.environ, PGPASSWORD='qaz123'))
                       print(f"✅ 새 VM '{hostname}' 및 네트워크 정보가 추가되었습니다.")
-
+          
           # 메인 실행
           workspace_id = get_workspace_id()
-          vm_files = glob.glob('/tmp/ansible-vminfo/*.json')
-
+          vm_files = glob.glob('/tmp/vm-info/*.json')
+          
           for vm_file in vm_files:
               with open(vm_file, 'r') as f:
                   try:
@@ -228,45 +212,18 @@ jobs:
                       print(f"❌ 오류: {vm_file} 파일을 파싱할 수 없습니다.")
                   except Exception as e:
                       print(f"❌ 오류 발생: {str(e)}")
-
+          
           print("✅ 모든 VM 정보 처리 완료")
           EOF
           
-          chmod +x /tmp/ansible-vminfo/save_to_db.py
-
-      - name: Create Temporary Directory on Ansible Master Server (192.168.50.11)
-        run: |
-          echo "🔧 Ansible 마스터 서버에 임시 디렉토리 생성 중..."
-          ssh -o StrictHostKeyChecking=no awx@192.168.50.11 "mkdir -p /tmp/ansible-vminfo"
-
-      - name: Fetch Ansible Files from DB Server
-        run: |
-          echo "🚀 DB 서버에서 Ansible 파일 가져오는 중..."
-          
-          # 임시 디렉토리 생성
-          mkdir -p /tmp/ansible-deploy
-
-          # 배포 스크립트 가져오기
-          scp -o StrictHostKeyChecking=no postgres@${{ env.SELECTED_DB_SERVER }}:${{ env.DEPLOY_SCRIPT }} /tmp/ansible-deploy/deploy.sh
-          
-          # Ansible 템플릿 디렉토리에서 필요한 파일 가져오기
-          scp -o StrictHostKeyChecking=no -r postgres@${{ env.SELECTED_DB_SERVER }}:${{ env.ANSIBLE_TEMPLATE_DIR }}/inventory /tmp/ansible-deploy/
-          scp -o StrictHostKeyChecking=no -r postgres@${{ env.SELECTED_DB_SERVER }}:${{ env.ANSIBLE_TEMPLATE_DIR }}/playbooks /tmp/ansible-deploy/
-
-      - name: Copy Ansible Files to Master Server
-        run: |
-          echo "🚀 Ansible 파일을 마스터 서버로 복사 중..."
-          
-          # 배포에 필요한 파일 복사
-          scp -o StrictHostKeyChecking=no -r /tmp/ansible-deploy/* awx@192.168.50.11:/tmp/ansible-deploy/
-          
-          # VM 정보 수집 플레이북 복사
-          scp -o StrictHostKeyChecking=no /tmp/ansible-vminfo/collect_vm_info.yml awx@192.168.50.11:/tmp/ansible-vminfo/
+          chmod +x /tmp/vm-info/update_db.py
 
       - name: Execute Ansible Deployment Script
         run: |
-          echo "🚀 Ansible 마스터 서버에서 배포 스크립트 실행 중..."
-          ssh -o StrictHostKeyChecking=no awx@192.168.50.11 "chmod +x /tmp/ansible-deploy/deploy.sh && /tmp/ansible-deploy/deploy.sh"
+          echo "🚀 배포 스크립트 실행 중..."
+          
+          # 스크립트 실행 권한 설정 및 실행
+          sshpass -p "${{ env.AWX_PASSWORD }}" ssh -o StrictHostKeyChecking=no awx@${{ env.ANSIBLE_MASTER }} "chmod +x /tmp/ansible-files/scripts/deploy.sh && cd /tmp/ansible-files && ./scripts/deploy.sh"
           
           DEPLOYMENT_STATUS=$?
           if [ $DEPLOYMENT_STATUS -eq 0 ]; then
@@ -279,22 +236,6 @@ jobs:
       - name: Run VM Info Collection Playbook
         run: |
           echo "🔍 VM 정보 수집 플레이북 실행 중..."
-          ssh -o StrictHostKeyChecking=no awx@192.168.50.11 "ansible-playbook -i /tmp/ansible-deploy/inventory/hosts /tmp/ansible-vminfo/collect_vm_info.yml"
-
-      - name: Fetch VM Info JSON Files from Master
-        run: |
-          echo "📤 마스터 서버에서 수집된 VM 정보 가져오는 중..."
-          scp -o StrictHostKeyChecking=no -r awx@192.168.50.11:/tmp/ansible-vminfo/*.json /tmp/ansible-vminfo/
-
-      - name: Save VM Info to Database
-        run: |
-          echo "💾 VM 정보를 데이터베이스에 저장 중..."
-          python3 /tmp/ansible-vminfo/save_to_db.py
-
-      - name: Cleanup
-        run: |
-          echo "🧹 임시 파일 정리 중..."
-          rm -rf /tmp/ansible-deploy
-          rm -rf /tmp/ansible-vminfo
-          ssh -o StrictHostKeyChecking=no awx@192.168.50.11 "rm -rf /tmp/ansible-deploy /tmp/ansible-vminfo"
-          echo "✅ 정리 완료"
+          
+          # VM 정보 수집 플레이북 실행
+          sshpass -p "${{ env.AWX_PASSWORD }}" ssh -o StrictHostKeyChecking=no awx@${{ env.ANSIBLE_MASTER }} "ansible-playbook -i /tmp/ansible-files/inventory/hosts /tmp/vm
