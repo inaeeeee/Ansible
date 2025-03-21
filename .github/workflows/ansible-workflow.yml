@@ -1,36 +1,17 @@
-name: Deploy and Collect VM Info with Ansible
+name: Deploy with Ansible on AWX Server
 
 on:
-  workflow_dispatch:  # 수동 실행
+  workflow_dispatch:  # 수동 실행 버튼 활성화
 
 jobs:
   deploy:
-    runs-on: self-hosted  # GitHub Actions 실행 서버
+    runs-on: self-hosted  # GitHub에 등록한 로컬 Runner 사용
 
     steps:
       - name: Checkout Repository
         uses: actions/checkout@v3
 
-      - name: Install Required Tools
-        run: |
-          echo "🔧 필요한 도구 설치 확인 중..."
-          # sshpass 확인 및 설치 (비밀번호 자동화용)
-          if ! command -v sshpass &> /dev/null; then
-            echo "⚠️ sshpass 설치 중..."
-            sudo yum install -y sshpass
-          else
-            echo "✅ sshpass가 이미 설치되어 있습니다."
-          fi
-          
-          # PostgreSQL 클라이언트 확인 및 설치
-          if ! command -v psql &> /dev/null; then
-            echo "⚠️ PostgreSQL 클라이언트 설치 중..."
-            sudo yum install -y postgresql
-          else
-            echo "✅ PostgreSQL 클라이언트가 이미 설치되어 있습니다."
-          fi
-
-      - name: Set Environment Variables
+      - name: 환경 변수 설정
         run: |
           echo "DB_PASSWORD=soldesk1." >> $GITHUB_ENV
           echo "AWX_PASSWORD=redhat" >> $GITHUB_ENV
@@ -39,331 +20,56 @@ jobs:
           echo "ANSIBLE_PATH=/tmp/ansible-files" >> $GITHUB_ENV
           echo "DB_ANSIBLE_PATH=/var/lib/pgsql/data/service_templates/ansible" >> $GITHUB_ENV
 
-      - name: Check Ansible Files on Master Server
+      - name: sshpass 설치 확인
         run: |
-          echo "🔍 마스터 서버의 Ansible 파일 구조 확인 중..."
-          
-          # 마스터 서버의 Ansible 파일 구조 확인
-          sshpass -p "${{ env.AWX_PASSWORD }}" ssh -o StrictHostKeyChecking=no awx@${{ env.ANSIBLE_MASTER }} "
-            echo '현재 Ansible 파일 구조:'
-            ls -la ${{ env.ANSIBLE_PATH }}/
-            
-            echo '인벤토리 파일 내용:'
-            cat ${{ env.ANSIBLE_PATH }}/inventory/hosts
-            
-            echo 'ansible.cfg 파일 내용:'
-            cat ${{ env.ANSIBLE_PATH }}/ansible.cfg
-          " || echo "일부 파일이 존재하지 않을 수 있습니다."
-
-      - name: Copy Ansible Files from DB Server (Optional)
-        run: |
-          echo "🚀 DB 서버에서 업데이트된 파일 확인 및 복사 중..."
-          
-          # DB 서버에서 업데이트된 파일이 있는지 확인하고 필요시 복사
-          # 이 단계는 선택적으로 실행할 수 있습니다
-          
-          # 로컬 임시 디렉토리 생성
-          mkdir -p /tmp/ansible-update
-          
-          # DB 서버에서 업데이트된 플레이북이나 스크립트만 가져오기
-          sshpass -p "${{ env.DB_PASSWORD }}" scp -o StrictHostKeyChecking=no -r postgres@${{ env.DB_SERVER }}:${{ env.DB_ANSIBLE_PATH }}/playbooks/* /tmp/ansible-update/ || echo "플레이북 복사 실패 또는 파일 없음"
-          
-          # 업데이트된 파일이 있으면 마스터 서버로 복사
-          if [ "$(ls -A /tmp/ansible-update)" ]; then
-            echo "✅ 업데이트된 파일이 발견되었습니다. 마스터 서버로 복사합니다."
-            sshpass -p "${{ env.AWX_PASSWORD }}" scp -o StrictHostKeyChecking=no -r /tmp/ansible-update/* awx@${{ env.ANSIBLE_MASTER }}:${{ env.ANSIBLE_PATH }}/playbooks/
+          if ! command -v sshpass &> /dev/null; then
+            echo "sshpass 설치 중..."
+            sudo apt-get update
+            sudo apt-get install -y sshpass
           else
-            echo "✅ 업데이트할 파일이 없습니다. 기존 파일을 사용합니다."
+            echo "sshpass가 이미 설치되어 있습니다."
           fi
 
-      - name: Verify Deployment Playbook
+      - name: PostgreSQL 서버에서 Ansible 정보 조회
         run: |
-          echo "🔍 배포 플레이북 확인 중..."
+          echo "PostgreSQL에서 Ansible 배포 정보 가져오는 중..."
           
-          # 배포 플레이북이 존재하는지 확인
-          sshpass -p "${{ env.AWX_PASSWORD }}" ssh -o StrictHostKeyChecking=no awx@${{ env.ANSIBLE_MASTER }} "
-            if [ -f ${{ env.ANSIBLE_PATH }}/deployment.yml ]; then
-              echo '✅ 배포 플레이북이 존재합니다.'
-              echo '플레이북 내용:'
-              cat ${{ env.ANSIBLE_PATH }}/deployment.yml
-            else
-              echo '⚠️ 배포 플레이북이 존재하지 않습니다. 기본 플레이북을 생성합니다.'
-              cat > ${{ env.ANSIBLE_PATH }}/deployment.yml << 'EOL'
-          ---
-          - name: 기본 배포 스크립트 실행
-            hosts: localhost
-            connection: local
-            tasks:
-              - name: 기본 배포 시작
-                debug:
-                  msg: '동적 배포 스크립트가 없어 기본 배포를 시작합니다.'
+          # sshpass로 DB 서버에 접속해 정보 조회
+          SERVICE_INFO=$(sshpass -p "${{ env.DB_PASSWORD }}" ssh -o StrictHostKeyChecking=no postgres@${{ env.DB_SERVER }} \
+            "psql -d solmakasedb -t -c \"SELECT name, deploy_script FROM servicetemplate WHERE name = 'ansible';\"")
 
-          - name: Nginx 웹 서버 구성
-            hosts: webservers
-            become: yes
-            tasks:
-              - name: Nginx 설치
-                package:
-                  name: nginx
-                  state: present
-                ignore_errors: yes
+          echo "Ansible 서비스 정보:"
+          echo "$SERVICE_INFO"
 
-              - name: Nginx 서비스 시작 및 활성화
-                service:
-                  name: nginx
-                  state: started
-                  enabled: yes
-                ignore_errors: yes
+          SERVICE_NAME=$(echo "$SERVICE_INFO" | awk -F '|' '{print $1}' | xargs)
+          DEPLOY_SCRIPT=$(echo "$SERVICE_INFO" | awk -F '|' '{print $2}' | xargs)
 
-              - name: 기본 웹 페이지 생성
-                copy:
-                  content: |
-                    <!DOCTYPE html>
-                    <html>
-                    <head>
-                      <title>Ansible 배포 테스트</title>
-                    </head>
-                    <body>
-                      <h1>Ansible로 배포된 웹 서버입니다</h1>
-                      <p>호스트명: {{ ansible_hostname }}</p>
-                      <p>IP 주소: {{ ansible_default_ipv4.address }}</p>
-                      <p>배포 시간: {{ ansible_date_time.iso8601 }}</p>
-                    </body>
-                    </html>
-                  dest: /usr/share/nginx/html/index.html
-                ignore_errors: yes
-          EOL
-            fi
-            
-            # 인벤토리 파일 확인 및 생성
-            if [ ! -f ${{ env.ANSIBLE_PATH }}/inventory/hosts ]; then
-              echo '⚠️ 인벤토리 파일이 존재하지 않습니다. 기본 인벤토리를 생성합니다.'
-              mkdir -p ${{ env.ANSIBLE_PATH }}/inventory
-              cat > ${{ env.ANSIBLE_PATH }}/inventory/hosts << 'EOL'
-          [webservers]
-          web-server1 ansible_host=192.168.50.13 ansible_user=awx ansible_ssh_pass=redhat ansible_sudo_pass=redhat
-          web-server2 ansible_host=192.168.50.14 ansible_user=awx ansible_ssh_pass=redhat ansible_sudo_pass=redhat
+          echo "----------------------------------------"
+          echo "서비스명: $SERVICE_NAME"
+          echo "배포 스크립트 경로: $DEPLOY_SCRIPT"
 
-          [dbservers]
-          db-server ansible_host=192.168.50.15 ansible_user=awx ansible_ssh_pass=redhat ansible_sudo_pass=redhat
-
-          [all:vars]
-          ansible_connection=ssh
-          ansible_ssh_common_args='-o StrictHostKeyChecking=no'
-          EOL
-            fi
-            
-            # ansible.cfg 파일 확인 및 생성
-            if [ ! -f ${{ env.ANSIBLE_PATH }}/ansible.cfg ]; then
-              echo '⚠️ ansible.cfg 파일이 존재하지 않습니다. 기본 설정 파일을 생성합니다.'
-              cat > ${{ env.ANSIBLE_PATH }}/ansible.cfg << 'EOL'
-          [defaults]
-          host_key_checking = False
-          remote_user = awx
-          
-          [ssh_connection]
-          scp_if_ssh = True
-          EOL
-            fi
-          "
-     
-      - name: Execute Ansible Deployment Playbook
+      - name: AWX 서버에서 목적지 폴더 생성
         run: |
-          echo "🚀 Ansible 배포 플레이북 실행 중..."
-          
-          # 마스터 서버에서 직접 Ansible 플레이북 실행
-          sshpass -p "${{ env.AWX_PASSWORD }}" ssh -o StrictHostKeyChecking=no awx@${{ env.ANSIBLE_MASTER }} "
-            cd ${{ env.ANSIBLE_PATH }} && 
-            ansible-playbook deployment.yml -v
-          "
-          
-          DEPLOYMENT_STATUS=$?
-          if [ $DEPLOYMENT_STATUS -eq 0 ]; then
-            echo "✅ 애플리케이션 배포에 성공했습니다!"
-          else
-            echo "⚠️ 배포 중 일부 작업이 실패했을 수 있습니다. 상태 코드: $DEPLOYMENT_STATUS"
-            echo "로그를 확인하세요."
-          fi
+          echo "AWX 서버에 목적지 폴더 생성 중..."
+          sshpass -p "${{ env.AWX_PASSWORD }}" ssh -o StrictHostKeyChecking=no awx@${{ env.ANSIBLE_MASTER }} \
+            "mkdir -p ${{ env.ANSIBLE_PATH }}"
 
-      - name: Create VM Info Collection Playbook
+      - name: DB 서버에서 AWX 서버로 Ansible 파일 복사
         run: |
-          echo "🔧 VM 정보 수집 플레이북 생성 중..."
+          echo "DB 서버에서 Ansible 파일 전체를 AWX 서버(${{ env.ANSIBLE_MASTER }})로 복사 중..."
           
-          # VM 정보 수집용 Ansible 플레이북 생성
-          cat > /tmp/collect_vm_info.yml << EOF
-          ---
-          - name: 서버 정보 수집
-            hosts: all
-            gather_facts: yes
-            tasks:
-              - name: 시스템 정보 수집
-                setup:
-
-              - name: VM 정보 저장
-                delegate_to: localhost
-                vars:
-                  ansible_connection: local
-                ansible.builtin.copy:
-                  content: |
-                    {
-                      "hostname": "{{ ansible_hostname }}",
-                      "ip_address": "{{ ansible_default_ipv4.address | default('unknown') }}",
-                      "os_type": "{{ ansible_distribution }} {{ ansible_distribution_version }}",
-                      "cpu_cores": {{ ansible_processor_cores | default(1) }},
-                      "memory_gb": {{ (ansible_memtotal_mb / 1024) | round | int | default(2) }},
-                      "storage_gb": {{ (ansible_mounts[0].size_total / 1024 / 1024 / 1024) | round | int | default(20) }},
-                      "status": "running"
-                    }
-                  dest: "/tmp/vm-info/{{ ansible_hostname }}.json"
-                  mode: '0644'
-          EOF
+          # DB 서버에서 AWX 서버로 sshpass를 사용해 파일 복사
+          sshpass -p "${{ env.DB_PASSWORD }}" ssh -o StrictHostKeyChecking=no postgres@${{ env.DB_SERVER }} \
+            "sshpass -p '${{ env.AWX_PASSWORD }}' scp -r ${{ env.DB_ANSIBLE_PATH }}/* awx@${{ env.ANSIBLE_MASTER }}:${{ env.ANSIBLE_PATH }}/"
           
-          # 마스터 서버에 VM 정보 플레이북 복사 및 디렉토리 생성
-          sshpass -p "${{ env.AWX_PASSWORD }}" ssh -o StrictHostKeyChecking=no awx@${{ env.ANSIBLE_MASTER }} "mkdir -p /tmp/vm-info"
-          sshpass -p "${{ env.AWX_PASSWORD }}" scp -o StrictHostKeyChecking=no /tmp/collect_vm_info.yml awx@${{ env.ANSIBLE_MASTER }}:${{ env.ANSIBLE_PATH }}/collect_vm_info.yml
+          echo "파일 복사 완료!"
 
-      - name: Run VM Info Collection Playbook
+      - name: AWX 서버에서 Ansible Playbook 실행
         run: |
-          echo "🔍 VM 정보 수집 플레이북 실행 중..."
+          echo "AWX 서버에서 Ansible Playbook 실행 중..."
           
-          # VM 정보 수집 플레이북 실행
-          sshpass -p "${{ env.AWX_PASSWORD }}" ssh -o StrictHostKeyChecking=no awx@${{ env.ANSIBLE_MASTER }} "
-            cd ${{ env.ANSIBLE_PATH }} && 
-            ansible-playbook collect_vm_info.yml -v
-          "
-
-      - name: Fetch VM Info JSON Files
-        run: |
-          echo "📤 수집된 VM 정보 가져오는 중..."
-          mkdir -p /tmp/vm-info-results
-          sshpass -p "${{ env.AWX_PASSWORD }}" scp -o StrictHostKeyChecking=no -r awx@${{ env.ANSIBLE_MASTER }}:/tmp/vm-info/*.json /tmp/vm-info-results/ || echo "VM 정보 파일이 없거나 가져오는데 실패했습니다."
+          # AWX 서버에 접속하여 ansible-playbook 명령 실행
+          sshpass -p "${{ env.AWX_PASSWORD }}" ssh -o StrictHostKeyChecking=no awx@${{ env.ANSIBLE_MASTER }} \
+            "cd ${{ env.ANSIBLE_PATH }} && ansible-playbook deployment.yml"
           
-          # 수집된 VM 정보 확인
-          echo "수집된 VM 정보 파일 목록:"
-          ls -la /tmp/vm-info-results/ || echo "VM 정보 파일이 없습니다."
-
-      - name: Create Database Update Script
-        run: |
-          echo "🔧 DB 업데이트 스크립트 생성 중..."
-          
-          # VM 정보를 DB에 저장하는 스크립트 생성
-          cat > /tmp/update_db.py << EOF
-          #!/usr/bin/env python3
-          import os
-          import json
-          import glob
-          import subprocess
-          import datetime
-          
-          def get_workspace_id():
-              """회사 워크스페이스 ID 조회"""
-              cmd = [
-                  'psql', '-h', '192.168.60.64', '-p', '5432', '-U', 'postgres', 
-                  '-d', 'solmakasedb', '-t', '-c', 
-                  "SELECT id FROM companywworkspace LIMIT 1;"
-              ]
-              result = subprocess.run(cmd, capture_output=True, text=True, env=dict(os.environ, PGPASSWORD='soldesk1.'))
-              return result.stdout.strip() or '1'  # 기본값 1
-          
-          def save_vm_info(vm_data, workspace_id):
-              """VM 정보를 DB에 저장"""
-              hostname = vm_data['hostname']
-              
-              # 기존 VM 확인
-              check_sql = f"SELECT id FROM vm WHERE name = '{hostname}'"
-              cmd = [
-                  'psql', '-h', '192.168.60.64', '-p', '5432', '-U', 'postgres', 
-                  '-d', 'solmakasedb', '-t', '-c', check_sql
-              ]
-              result = subprocess.run(cmd, capture_output=True, text=True, env=dict(os.environ, PGPASSWORD='soldesk1.'))
-              vm_id = result.stdout.strip()
-              
-              now = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-              
-              if vm_id:
-                  # VM 업데이트
-                  update_sql = f"""
-                  UPDATE vm SET 
-                      os_type = '{vm_data['os_type']}',
-                      cpu_cores = {vm_data['cpu_cores']},
-                      memory_gb = {vm_data['memory_gb']},
-                      storage_gb = {vm_data['storage_gb']},
-                      status = '{vm_data['status']}',
-                      total_usage_hrs = total_usage_hrs + 1
-                  WHERE id = {vm_id}
-                  """
-                  cmd = [
-                      'psql', '-h', '192.168.60.64', '-p', '5432', '-U', 'postgres', 
-                      '-d', 'solmakasedb', '-c', update_sql
-                  ]
-                  subprocess.run(cmd, env=dict(os.environ, PGPASSWORD='soldesk1.'))
-                  print(f"✅ VM '{hostname}' 정보가 업데이트되었습니다.")
-              else:
-                  # 새 VM 추가
-                  insert_sql = f"""
-                  INSERT INTO vm (
-                      name, os_type, cpu_cores, memory_gb, storage_gb, 
-                      status, total_usage_hrs, created_at, company_workspace_id
-                  ) VALUES (
-                      '{hostname}', '{vm_data['os_type']}', {vm_data['cpu_cores']}, 
-                      {vm_data['memory_gb']}, {vm_data['storage_gb']}, '{vm_data['status']}', 
-                      0, '{now}', {workspace_id}
-                  ) RETURNING id
-                  """
-                  cmd = [
-                      'psql', '-h', '192.168.60.64', '-p', '5432', '-U', 'postgres', 
-                      '-d', 'solmakasedb', '-t', '-c', insert_sql
-                  ]
-                  result = subprocess.run(cmd, capture_output=True, text=True, env=dict(os.environ, PGPASSWORD='soldesk1.'))
-                  new_vm_id = result.stdout.strip()
-                  
-                  # VM 네트워크 정보 추가
-                  if new_vm_id:
-                      network_sql = f"""
-                      INSERT INTO vm_network (vm_id, ip_address, network_type)
-                      VALUES ({new_vm_id}, '{vm_data['ip_address']}', 'internal')
-                      """
-                      cmd = [
-                          'psql', '-h', '192.168.60.64', '-p', '5432', '-U', 'postgres', 
-                          '-d', 'solmakasedb', '-c', network_sql
-                      ]
-                      subprocess.run(cmd, env=dict(os.environ, PGPASSWORD='soldesk1.'))
-                      print(f"✅ 새 VM '{hostname}' 및 네트워크 정보가 추가되었습니다.")
-          
-          # 메인 실행
-          workspace_id = get_workspace_id()
-          vm_files = glob.glob('/tmp/vm-info-results/*.json')
-          
-          if not vm_files:
-              print("⚠️ 수집된 VM 정보 파일이 없습니다.")
-              exit(0)
-              
-          print(f"총 {len(vm_files)}개의 VM 정보 파일을 처리합니다.")
-          for vm_file in vm_files:
-              try:
-                  with open(vm_file, 'r') as f:
-                      vm_data = json.load(f)
-                      save_vm_info(vm_data, workspace_id)
-              except json.JSONDecodeError:
-                  print(f"❌ 오류: {vm_file} 파일을 파싱할 수 없습니다.")
-              except Exception as e:
-                  print(f"❌ 오류 발생: {str(e)}")
-          
-          print("✅ 모든 VM 정보 처리 완료")
-          EOF
-          
-          chmod +x /tmp/update_db.py
-
-      - name: Update Database with VM Information
-        run: |
-          echo "💾 VM 정보 DB 업데이트 중..."
-          # JSON 파일이 있는지 확인
-          if [ -z "$(ls -A /tmp/vm-info-results/*.json 2>/dev/null)" ]; then
-            echo "⚠️ 수집된 VM 정보 파일이 없습니다"
-            exit 0
-          fi
-          
-          # DB 업데이트 스크립트 실행
-          python3 /tmp/update_db.py
-          
-          echo "✅ 워크플로우 실행 완료!"
+          echo "Ansible Playbook 실행 완료!"
