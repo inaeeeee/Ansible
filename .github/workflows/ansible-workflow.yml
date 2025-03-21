@@ -82,46 +82,7 @@ jobs:
           
           # 배포 플레이북이 존재하는지 확인
           sshpass -p "${{ env.AWX_PASSWORD }}" ssh -o StrictHostKeyChecking=no awx@${{ env.ANSIBLE_MASTER }} "
-            if [ -f ${{ env.ANSIBLE_PATH }}/deployment.yml ]; then
-              echo '✅ 배포 플레이북이 존재합니다:'
-              cat ${{ env.ANSIBLE_PATH }}/deployment.yml | head -20
-            else
-              echo '⚠️ 배포 플레이북이 없습니다. 기본 플레이북을 생성합니다.'
-              cat > ${{ env.ANSIBLE_PATH }}/deployment.yml << EOF
----
-- name: 기본 배포 스크립트 실행
-  hosts: localhost
-  connection: local
-  gather_facts: no
-  tasks:
-    - name: 기본 배포 시작
-      debug:
-        msg: '동적 배포 스크립트가 없어 기본 배포를 시작합니다.'
-
-- name: 웹 서버 구성
-  hosts: webservers
-  become: yes
-  tasks:
-    - name: 웹 서버 상태 확인
-      ping:
-
-- name: 데이터베이스 서버 구성
-  hosts: database
-  become: yes
-  tasks:
-    - name: DB 서버 상태 확인
-      ping:
-
-- name: 로드밸런서 구성
-  hosts: lb
-  become: yes
-  tasks:
-    - name: LB 서버 상태 확인
-      ping:
-EOF
-            fi
-          "
-
+     
       - name: Execute Ansible Deployment Playbook
         run: |
           echo "🚀 Ansible 배포 플레이북 실행 중..."
