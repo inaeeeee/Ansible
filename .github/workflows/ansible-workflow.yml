@@ -90,12 +90,9 @@ jobs:
           echo "마스터 서버의 Ansible 파일 구조:"
           sshpass -p "${{ env.AWX_PASSWORD }}" ssh -o StrictHostKeyChecking=no awx@${{ env.ANSIBLE_MASTER }} "ls -la ${{ env.ANSIBLE_PATH }}/"
           
-          # scripts 디렉토리 내용 확인
-          echo "스크립트 파일 확인:"
-          sshpass -p "${{ env.AWX_PASSWORD }}" ssh -o StrictHostKeyChecking=no awx@${{ env.ANSIBLE_MASTER }} "ls -la ${{ env.ANSIBLE_PATH }}/scripts/"
-          
-          # 스크립트 파일에 실행 권한 부여
-          sshpass -p "${{ env.AWX_PASSWORD }}" ssh -o StrictHostKeyChecking=no awx@${{ env.ANSIBLE_MASTER }} "chmod -R +x ${{ env.ANSIBLE_PATH }}/scripts/"
+          # 플레이북 디렉토리 내용 확인
+          echo "플레이북 파일 확인:"
+          sshpass -p "${{ env.AWX_PASSWORD }}" ssh -o StrictHostKeyChecking=no awx@${{ env.ANSIBLE_MASTER }} "ls -la ${{ env.ANSIBLE_PATH }}/playbooks/"
 
       - name: Create logs Directory
         run: |
@@ -104,12 +101,12 @@ jobs:
           # 로그 디렉토리가 없으면 생성
           sshpass -p "${{ env.AWX_PASSWORD }}" ssh -o StrictHostKeyChecking=no awx@${{ env.ANSIBLE_MASTER }} "mkdir -p ${{ env.ANSIBLE_PATH }}/logs && chmod 777 ${{ env.ANSIBLE_PATH }}/logs"
 
-      - name: Execute Ansible Deployment Script
+      - name: Execute Ansible Deployment Playbook
         run: |
-          echo "🚀 배포 스크립트 실행 중..."
+          echo "🚀 Ansible 배포 플레이북 실행 중..."
           
-          # 마스터 서버에서 배포 스크립트 실행
-          sshpass -p "${{ env.AWX_PASSWORD }}" ssh -o StrictHostKeyChecking=no awx@${{ env.ANSIBLE_MASTER }} "cd ${{ env.ANSIBLE_PATH }} && bash scripts/deploy.sh"
+          # 마스터 서버에서 직접 Ansible 플레이북 실행
+          sshpass -p "${{ env.AWX_PASSWORD }}" ssh -o StrictHostKeyChecking=no awx@${{ env.ANSIBLE_MASTER }} "cd ${{ env.ANSIBLE_PATH }} && ansible-playbook -i inventory/hosts playbooks/deployment.yml"
           
           DEPLOYMENT_STATUS=$?
           if [ $DEPLOYMENT_STATUS -eq 0 ]; then
@@ -257,30 +254,4 @@ jobs:
                           '-d', 'solmakasedb', '-c', network_sql
                       ]
                       subprocess.run(cmd, env=dict(os.environ, PGPASSWORD='soldesk1.'))
-                      print(f"✅ 새 VM '{hostname}' 및 네트워크 정보가 추가되었습니다.")
-          
-          # 메인 실행
-          workspace_id = get_workspace_id()
-          vm_files = glob.glob('/tmp/vm-info-results/*.json')
-          
-          for vm_file in vm_files:
-              with open(vm_file, 'r') as f:
-                  try:
-                      vm_data = json.load(f)
-                      save_vm_info(vm_data, workspace_id)
-                  except json.JSONDecodeError:
-                      print(f"❌ 오류: {vm_file} 파일을 파싱할 수 없습니다.")
-                  except Exception as e:
-                      print(f"❌ 오류 발생: {str(e)}")
-          
-          print("✅ 모든 VM 정보 처리 완료")
-          EOF
-          
-          chmod +x /tmp/update_db.py
-
-      - name: Update Database with VM Information
-        run: |
-          echo "💾 VM 정보 DB 업데이트 중..."
-          # JSON 파일이 있는지 확인
-          if [ -z "$(ls -A /tmp/vm-info-results/*.json 2>/dev/null)" ]; then
-            echo "⚠️ 수집된 VM 정보 파일이 없습니다
+                      print(f
