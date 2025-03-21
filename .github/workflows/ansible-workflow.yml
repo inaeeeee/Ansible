@@ -38,36 +38,92 @@ jobs:
           echo "ANSIBLE_MASTER=192.168.50.11" >> $GITHUB_ENV
           echo "ANSIBLE_PATH=/var/lib/pgsql/data/service_templates/ansible" >> $GITHUB_ENV
 
-      - name: Create Temporary Directories
+      - name: Prepare Target Directory on Master Server
         run: |
-          echo "🔧 임시 디렉토리 생성 중..."
-          mkdir -p /tmp/ansible-files
-          mkdir -p /tmp/vm-info
+          echo "🔧 마스터 서버에 동일한 경로 구조 생성 중..."
+          # 마스터 서버에 동일한 디렉토리 구조 생성
+          sshpass -p "${{ env.AWX_PASSWORD }}" ssh -o StrictHostKeyChecking=no awx@${{ env.ANSIBLE_MASTER }} "sudo mkdir -p /var/lib/pgsql/data/service_templates/ansible"
           
-          # 마스터 서버에 임시 디렉토리 생성
-          sshpass -p "${{ env.AWX_PASSWORD }}" ssh -o StrictHostKeyChecking=no awx@${{ env.ANSIBLE_MASTER }} "mkdir -p /tmp/ansible-files /tmp/vm-info"
+          # 권한 설정
+          sshpass -p "${{ env.AWX_PASSWORD }}" ssh -o StrictHostKeyChecking=no awx@${{ env.ANSIBLE_MASTER }} "sudo chown -R awx:awx /var/lib/pgsql"
+          
+          # 디렉토리 확인
+          sshpass -p "${{ env.AWX_PASSWORD }}" ssh -o StrictHostKeyChecking=no awx@${{ env.ANSIBLE_MASTER }} "ls -la /var/lib/pgsql/data/service_templates/"
 
-      - name: Copy Entire Ansible Directory from DB Server to Master Server
+      - name: Copy Entire Ansible Directory from DB Server
         run: |
-          echo "🚀 DB 서버에서 Ansible 폴더 전체를 마스터 서버로 복사 중..."
+          echo "🚀 DB 서버에서 전체 Ansible 구성 폴더 복사 중..."
           
-          # 1단계: DB 서버에서 로컬로 파일 복사
-          echo "📦 DB 서버에서 로컬로 Ansible 폴더 복사 중..."
-          sshpass -p "${{ env.DB_PASSWORD }}" scp -o StrictHostKeyChecking=no -r postgres@${{ env.DB_SERVER }}:${{ env.ANSIBLE_PATH }}/* /tmp/ansible-files/
+          # 로컬 임시 디렉토리 생성
+          mkdir -p /tmp/ansible-full
           
-          # 2단계: 로컬에서 마스터 서버로 파일 복사
-          echo "📦 로컬에서 마스터 서버로 Ansible 폴더 복사 중..."
-          sshpass -p "${{ env.AWX_PASSWORD }}" scp -o StrictHostKeyChecking=no -r /tmp/ansible-files/* awx@${{ env.ANSIBLE_MASTER }}:/tmp/ansible-files/
+          # 1. DB 서버에서 로컬 임시 폴더로 파일 복사
+          sshpass -p "${{ env.DB_PASSWORD }}" scp -o StrictHostKeyChecking=no -r postgres@${{ env.DB_SERVER }}:${{ env.ANSIBLE_PATH }}/* /tmp/ansible-full/
           
-          # 스크립트 실행 권한 확인
-          echo "🔧 스크립트 실행 권한 설정 중..."
-          sshpass -p "${{ env.AWX_PASSWORD }}" ssh -o StrictHostKeyChecking=no awx@${{ env.ANSIBLE_MASTER }} "chmod -R +x /tmp/ansible-files/scripts/"
+          # 다운로드된 파일 확인
+          echo "다운로드된 Ansible 파일 구조:"
+          ls -la /tmp/ansible-full/
+          
+          # 주요 파일/폴더 확인
+          if [ -d "/tmp/ansible-full/scripts" ]; then
+            echo "✅ scripts 디렉토리가 존재합니다"
+            ls -la /tmp/ansible-full/scripts/
+          else
+            echo "❌ scripts 디렉토리가 없습니다"
+          fi
+          
+          if [ -d "/tmp/ansible-full/playbooks" ]; then
+            echo "✅ playbooks 디렉토리가 존재합니다"
+            ls -la /tmp/ansible-full/playbooks/
+          else
+            echo "❌ playbooks 디렉토리가 없습니다"
+          fi
+
+      - name: Copy Ansible Files to Master Server
+        run: |
+          echo "🚀 마스터 서버로 Ansible 파일 복사 중..."
+          
+          # 2. 로컬 임시 폴더에서 마스터 서버의 동일한 경로로 파일 복사
+          sshpass -p "${{ env.AWX_PASSWORD }}" scp -o StrictHostKeyChecking=no -r /tmp/ansible-full/* awx@${{ env.ANSIBLE_MASTER }}:${{ env.ANSIBLE_PATH }}/
+          
+          # 마스터 서버에 파일이 제대로 복사되었는지 확인
+          echo "마스터 서버의 Ansible 파일 구조:"
+          sshpass -p "${{ env.AWX_PASSWORD }}" ssh -o StrictHostKeyChecking=no awx@${{ env.ANSIBLE_MASTER }} "ls -la ${{ env.ANSIBLE_PATH }}/"
+          
+          # scripts 디렉토리 내용 확인
+          echo "스크립트 파일 확인:"
+          sshpass -p "${{ env.AWX_PASSWORD }}" ssh -o StrictHostKeyChecking=no awx@${{ env.ANSIBLE_MASTER }} "ls -la ${{ env.ANSIBLE_PATH }}/scripts/"
+          
+          # 스크립트 파일에 실행 권한 부여
+          sshpass -p "${{ env.AWX_PASSWORD }}" ssh -o StrictHostKeyChecking=no awx@${{ env.ANSIBLE_MASTER }} "chmod -R +x ${{ env.ANSIBLE_PATH }}/scripts/"
+
+      - name: Create logs Directory
+        run: |
+          echo "🔧 로그 디렉토리 생성 중..."
+          
+          # 로그 디렉토리가 없으면 생성
+          sshpass -p "${{ env.AWX_PASSWORD }}" ssh -o StrictHostKeyChecking=no awx@${{ env.ANSIBLE_MASTER }} "mkdir -p ${{ env.ANSIBLE_PATH }}/logs && chmod 777 ${{ env.ANSIBLE_PATH }}/logs"
+
+      - name: Execute Ansible Deployment Script
+        run: |
+          echo "🚀 배포 스크립트 실행 중..."
+          
+          # 마스터 서버에서 배포 스크립트 실행
+          sshpass -p "${{ env.AWX_PASSWORD }}" ssh -o StrictHostKeyChecking=no awx@${{ env.ANSIBLE_MASTER }} "cd ${{ env.ANSIBLE_PATH }} && bash scripts/deploy.sh"
+          
+          DEPLOYMENT_STATUS=$?
+          if [ $DEPLOYMENT_STATUS -eq 0 ]; then
+            echo "✅ 애플리케이션 배포에 성공했습니다!"
+          else
+            echo "❌ 배포에 실패했습니다. 상태 코드: $DEPLOYMENT_STATUS"
+          fi
 
       - name: Create VM Info Collection Playbook
         run: |
           echo "🔧 VM 정보 수집 플레이북 생성 중..."
           
           # VM 정보 수집용 Ansible 플레이북 생성
+          mkdir -p /tmp/vm-info
           cat > /tmp/vm-info/collect_vm_info.yml << EOF
           ---
           - name: 서버 정보 수집
@@ -96,15 +152,31 @@ jobs:
                   mode: '0644'
           EOF
           
+          # 마스터 서버에 VM 정보 디렉토리 생성
+          sshpass -p "${{ env.AWX_PASSWORD }}" ssh -o StrictHostKeyChecking=no awx@${{ env.ANSIBLE_MASTER }} "mkdir -p /tmp/vm-info"
+          
           # VM 정보 수집 플레이북을 마스터 서버로 복사
           sshpass -p "${{ env.AWX_PASSWORD }}" scp -o StrictHostKeyChecking=no /tmp/vm-info/collect_vm_info.yml awx@${{ env.ANSIBLE_MASTER }}:/tmp/vm-info/
+
+      - name: Run VM Info Collection Playbook
+        run: |
+          echo "🔍 VM 정보 수집 플레이북 실행 중..."
+          
+          # VM 정보 수집 플레이북 실행
+          sshpass -p "${{ env.AWX_PASSWORD }}" ssh -o StrictHostKeyChecking=no awx@${{ env.ANSIBLE_MASTER }} "cd ${{ env.ANSIBLE_PATH }} && ansible-playbook -i inventory/hosts /tmp/vm-info/collect_vm_info.yml"
+
+      - name: Fetch VM Info JSON Files
+        run: |
+          echo "📤 수집된 VM 정보 가져오는 중..."
+          mkdir -p /tmp/vm-info-results
+          sshpass -p "${{ env.AWX_PASSWORD }}" scp -o StrictHostKeyChecking=no -r awx@${{ env.ANSIBLE_MASTER }}:/tmp/vm-info/*.json /tmp/vm-info-results/
 
       - name: Create Database Update Script
         run: |
           echo "🔧 DB 업데이트 스크립트 생성 중..."
           
           # VM 정보를 DB에 저장하는 스크립트 생성
-          cat > /tmp/vm-info/update_db.py << EOF
+          cat > /tmp/update_db.py << EOF
           #!/usr/bin/env python3
           import os
           import json
@@ -189,7 +261,7 @@ jobs:
           
           # 메인 실행
           workspace_id = get_workspace_id()
-          vm_files = glob.glob('/tmp/vm-info/*.json')
+          vm_files = glob.glob('/tmp/vm-info-results/*.json')
           
           for vm_file in vm_files:
               with open(vm_file, 'r') as f:
@@ -204,64 +276,11 @@ jobs:
           print("✅ 모든 VM 정보 처리 완료")
           EOF
           
-          chmod +x /tmp/vm-info/update_db.py
-
-      - name: Execute Ansible Deployment Script
-        run: |
-          echo "🚀 배포 스크립트 실행 중..."
-          
-          # 스크립트 경로 확인
-          sshpass -p "${{ env.AWX_PASSWORD }}" ssh -o StrictHostKeyChecking=no awx@${{ env.ANSIBLE_MASTER }} "ls -la /tmp/ansible-files/scripts/"
-          
-          # 마스터 서버에서 배포 스크립트 실행 (경로 수정)
-          sshpass -p "${{ env.AWX_PASSWORD }}" ssh -o StrictHostKeyChecking=no awx@${{ env.ANSIBLE_MASTER }} "cd /tmp/ansible-files && /bin/bash scripts/deploy.sh"
-          
-          DEPLOYMENT_STATUS=$?
-          if [ $DEPLOYMENT_STATUS -eq 0 ]; then
-            echo "✅ 애플리케이션 배포에 성공했습니다!"
-          else
-            echo "❌ 배포에 실패했습니다. 상태 코드: $DEPLOYMENT_STATUS"
-            # 오류 발생해도 워크플로우 계속 진행
-            # exit $DEPLOYMENT_STATUS
-          fi
-
-      - name: Run VM Info Collection Playbook
-        run: |
-          echo "🔍 VM 정보 수집 플레이북 실행 중..."
-          
-          # VM 정보 수집 플레이북 실행 (인벤토리 사용)
-          sshpass -p "${{ env.AWX_PASSWORD }}" ssh -o StrictHostKeyChecking=no awx@${{ env.ANSIBLE_MASTER }} "cd /tmp/ansible-files && ansible-playbook -i inventory/hosts /tmp/vm-info/collect_vm_info.yml"
-
-      - name: Fetch VM Info JSON Files
-        run: |
-          echo "📤 수집된 VM 정보 가져오는 중..."
-          mkdir -p /tmp/vm-info-results
-          sshpass -p "${{ env.AWX_PASSWORD }}" scp -o StrictHostKeyChecking=no -r awx@${{ env.ANSIBLE_MASTER }}:/tmp/vm-info/*.json /tmp/vm-info-results/
+          chmod +x /tmp/update_db.py
 
       - name: Update Database with VM Information
         run: |
           echo "💾 VM 정보 DB 업데이트 중..."
           # JSON 파일이 있는지 확인
           if [ -z "$(ls -A /tmp/vm-info-results/*.json 2>/dev/null)" ]; then
-            echo "⚠️ 수집된 VM 정보 파일이 없습니다."
-          else
-            echo "📊 수집된 VM 정보 목록:"
-            ls -la /tmp/vm-info-results/*.json
-            
-            # JSON 파일을 /tmp/vm-info로 복사
-            cp /tmp/vm-info-results/*.json /tmp/vm-info/
-            
-            # DB 업데이트 스크립트 실행
-            python3 /tmp/vm-info/update_db.py
-          fi
-
-      - name: Cleanup
-        run: |
-          echo "🧹 임시 파일 정리 중..."
-          rm -rf /tmp/ansible-files
-          rm -rf /tmp/vm-info
-          rm -rf /tmp/vm-info-results
-          
-          sshpass -p "${{ env.AWX_PASSWORD }}" ssh -o StrictHostKeyChecking=no awx@${{ env.ANSIBLE_MASTER }} "rm -rf /tmp/ansible-files /tmp/vm-info"
-          
-          echo "✅ 정리 완료"
+            echo "⚠️ 수집된 VM 정보 파일이 없습니다
