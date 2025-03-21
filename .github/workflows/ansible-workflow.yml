@@ -19,7 +19,8 @@ jobs:
           echo "ANSIBLE_MASTER=192.168.50.11" >> $GITHUB_ENV
           echo "ANSIBLE_PATH=/tmp/ansible-files" >> $GITHUB_ENV
           echo "DB_ANSIBLE_PATH=/var/lib/pgsql/data/service_templates/ansible" >> $GITHUB_ENV
-
+          echo "WEB_PASSWORD=redhat" >> $GITHUB_ENV
+          
       - name: sshpass 설치 확인
         run: |
           if ! command -v sshpass &> /dev/null; then
@@ -29,22 +30,21 @@ jobs:
           else
             echo "sshpass가 이미 설치되어 있습니다."
           fi
-
+          
       - name: PostgreSQL 서버에서 Ansible 정보 조회
         run: |
           echo "PostgreSQL에서 Ansible 배포 정보 가져오는 중..."
           
           SERVICE_INFO=$(sshpass -p "${{ env.DB_PASSWORD }}" ssh -o StrictHostKeyChecking=no postgres@${{ env.DB_SERVER }} \
             "psql -d solmakasedb -t -c \"SELECT name, deploy_script FROM servicetemplate WHERE name = 'ansible';\"")
-
           echo "Ansible 서비스 정보:"
           echo "$SERVICE_INFO"
-
+          
       - name: Runner에 임시 디렉토리 생성
         run: |
           echo "Runner에 임시 디렉토리 생성 중..."
           mkdir -p /tmp/ansible-temp
-
+          
       - name: DB 서버에서 Runner로 파일 다운로드
         run: |
           echo "DB 서버에서 Ansible 파일을 Runner로 다운로드 중..."
@@ -53,7 +53,36 @@ jobs:
           
           echo "DB 서버에서 파일 다운로드 완료!"
           ls -la /tmp/ansible-temp/
-
+          
+      - name: Ansible 설정 파일 수정
+        run: |
+          echo "Ansible 설정 파일 수정 중..."
+          
+          # inventory 파일 확인 및 수정
+          if [ -f /tmp/ansible-temp/inventory ]; then
+            cat /tmp/ansible-temp/inventory
+            
+            # SSH 비밀번호 인증 설정 추가
+            echo "
+          [all:vars]
+          ansible_user=awx
+          ansible_password=${{ env.WEB_PASSWORD }}
+          ansible_ssh_common_args='-o StrictHostKeyChecking=no'
+          ansible_connection=ssh
+          " >> /tmp/ansible-temp/inventory
+            
+            echo "인벤토리 파일 수정 완료"
+            cat /tmp/ansible-temp/inventory
+          fi
+          
+          # ansible.cfg 파일 생성 또는 수정
+          echo "[defaults]
+          host_key_checking = False
+          remote_user = awx
+          " > /tmp/ansible-temp/ansible.cfg
+          
+          echo "Ansible 설정 파일 준비 완료"
+          
       - name: Runner에서 AWX 서버로 파일 업로드
         run: |
           echo "Runner에서 AWX 서버로 Ansible 파일 업로드 중..."
@@ -67,19 +96,36 @@ jobs:
             /tmp/ansible-temp/* awx@${{ env.ANSIBLE_MASTER }}:${{ env.ANSIBLE_PATH }}/
           
           echo "AWX 서버로 파일 업로드 완료!"
-
+          
       - name: AWX 서버에서 파일 확인
         run: |
           echo "AWX 서버에 파일이 정상적으로 복사되었는지 확인 중..."
           sshpass -p "${{ env.AWX_PASSWORD }}" ssh -o StrictHostKeyChecking=no \
             awx@${{ env.ANSIBLE_MASTER }} "ls -la ${{ env.ANSIBLE_PATH }}"
-
+            
+      - name: AWX 서버 SSH 키 설정
+        run: |
+          echo "AWX 서버에서 SSH 키 권한 설정 중..."
+          
+          # SSH 키 생성 및 권한 설정
+          sshpass -p "${{ env.AWX_PASSWORD }}" ssh -o StrictHostKeyChecking=no \
+            awx@${{ env.ANSIBLE_MASTER }} "
+            if [ ! -f ~/.ssh/id_rsa ]; then
+              mkdir -p ~/.ssh
+              ssh-keygen -t rsa -N '' -f ~/.ssh/id_rsa
+              chmod 600 ~/.ssh/id_rsa
+              chmod 644 ~/.ssh/id_rsa.pub
+            fi
+            "
+            
+          echo "SSH 키 설정 완료"
+          
       - name: AWX 서버에서 Ansible Playbook 실행
         run: |
           echo "AWX 서버에서 Ansible Playbook 실행 중..."
           
-          # AWX 서버에 접속하여 ansible-playbook 명령 실행
+          # AWX 서버에 접속하여 ansible-playbook 명령 실행 (비밀번호 인증 사용)
           sshpass -p "${{ env.AWX_PASSWORD }}" ssh -o StrictHostKeyChecking=no \
-            awx@${{ env.ANSIBLE_MASTER }} "cd ${{ env.ANSIBLE_PATH }} && ansible-playbook deployment.yml"
+            awx@${{ env.ANSIBLE_MASTER }} "cd ${{ env.ANSIBLE_PATH }} && ANSIBLE_HOST_KEY_CHECKING=False ansible-playbook -i inventory deployment.yml -e 'ansible_user=awx ansible_password=${{ env.WEB_PASSWORD }}' -v"
           
           echo "Ansible Playbook 실행 완료!"
